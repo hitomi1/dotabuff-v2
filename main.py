@@ -41,7 +41,9 @@ def main():
     parser.add_argument("--api-key", default=None,
                         help="OpenDota API key (optional, increases rate limit)")
     parser.add_argument("--stratz-token", default=None,
-                        help="STRATZ API token for live match lookups")
+                        help="STRATZ API token for post-match lookups")
+    parser.add_argument("--steam-api-key", default=None,
+                        help="Steam Web API key for real-time player lookup (steamcommunity.com/dev/apikey)")
     parser.add_argument("--dota-path", default=None,
                         help="Path to Dota 2 game/dota directory (for console.log parsing)")
     parser.add_argument("--debug",   action="store_true",
@@ -55,6 +57,7 @@ def main():
     client  = OpenDotaClient(api_key=args.api_key)
     finder  = MatchFinder(
         stratz_token=args.stratz_token,
+        steam_api_key=args.steam_api_key,
         dota_path=args.dota_path,
     )
 

@@ -1,14 +1,15 @@
 """Multi-strategy player discovery for live Dota 2 matches.
 
 Bypasses the GSI limitation where ``allplayers`` data is only available
-to spectators.  Three strategies are attempted in order:
+to spectators.  Four strategies are tried in parallel / sequence:
 
-1. **STRATZ Live Match API** – GraphQL query using the match_id.
-2. **Console-log + STRATZ name search** – reads the player table from
-   Dota 2's console.log (always present, no launch option needed) and
-   resolves each player name to a Steam ID via STRATZ search.
-3. **Post-match OpenDota polling** – waits for OpenDota to parse the
-   finished match and returns all 10 players.
+0. **Steam GetRealtimeStats** – reads the game-server Steam ID from
+   console.log and calls the Steam Web API to get all 10 players in
+   real-time. Fastest; requires a Steam Web API key and -condebug.
+1. **STRATZ match(id) query** – works ~2 min after the match ENDS.
+2. **Console-log + STRATZ name search** – parses the player table written
+   by the Source engine `status` command if it appears in console.log.
+3. **Post-match OpenDota polling** – polls every 60 s for up to 15 min.
 """
 
 import logging
@@ -72,9 +73,16 @@ _DEFAULT_DOTA_PATHS: dict[str, list[str]] = {
 }
 
 STRATZ_GQL_URL = "https://api.stratz.com/graphql"
+STEAM_REALTIME_URL = "https://api.steampowered.com/IDOTA2MatchStats_570/GetRealtimeStats/v001/"
+
+# Regex to extract server Steam ID + match_id from console.log line:
+# [SteamNetSockets] Received Steam datagram ticket for server steamid:90283504750644245 ... match_id=8745218084
+_SERVER_STEAMID_RE = re.compile(
+    r"steamid:(\d+)\s+vport\s+\d+\.\s+match_id=(\d+)"
+)
 
 # Query match players directly — works for both live and finished matches.
-# STRATZ indexes matchmaking games within ~2 min of start.
+# STRATZ indexes matchmaking games within ~2 min after match end.
 _MATCH_QUERY = """
 query GetMatch($matchId: Long!) {
   match(id: $matchId) {
@@ -103,23 +111,33 @@ class MatchFinder:
         self,
         stratz_token: str | None = None,
         dota_path: str | None = None,
+        steam_api_key: str | None = None,
     ):
-        self.stratz_token = stratz_token or os.environ.get("STRATZ_TOKEN")
-        self.dota_path = self._resolve_dota_path(dota_path)
+        self.stratz_token  = stratz_token  or os.environ.get("STRATZ_TOKEN")
+        self.steam_api_key = steam_api_key or os.environ.get("STEAM_API_KEY")
+        self.dota_path     = self._resolve_dota_path(dota_path)
 
-        if self.stratz_token:
-            logger.info("STRATZ token configured — live match API enabled.")
+        if self.steam_api_key:
+            logger.info("Steam API key configured — GetRealtimeStats enabled (real-time).")
         else:
             logger.warning(
-                "No STRATZ token. Set --stratz-token or STRATZ_TOKEN env var "
-                "to enable live match lookups."
+                "No Steam API key. Real-time player lookup disabled. "
+                "Get a free key at https://steamcommunity.com/dev/apikey "
+                "and set --steam-api-key or STEAM_API_KEY env var."
+            )
+
+        if self.stratz_token:
+            logger.info("STRATZ token configured — post-match lookup enabled.")
+        else:
+            logger.warning(
+                "No STRATZ token. Set --stratz-token or STRATZ_TOKEN env var."
             )
 
         if self.dota_path:
             logger.info(f"Dota 2 path: {self.dota_path}")
         else:
             logger.warning(
-                "Dota 2 path not found. Console-log fallback disabled. "
+                "Dota 2 path not found. Console-log parsing disabled. "
                 "Pass --dota-path or install Dota 2 in the default location."
             )
 
@@ -135,12 +153,21 @@ class MatchFinder:
     ) -> tuple[list[str], list[str]]:
         """Return ``(teammates, enemies)`` lists of Steam-64 IDs.
 
-        Tries three strategies in order, falling back if each fails.
+        Strategy order:
+        0. Steam GetRealtimeStats (real-time, needs STEAM_API_KEY + console.log)
+        1. STRATZ match(id) — post-match, ~2 min after end
+        2. Console-log + STRATZ name search — if status table appears
+        3. OpenDota polling — up to 15 min post-match
         """
         import concurrent.futures as _cf
 
-        # Run Strategy 1 (STRATZ match query) and Strategy 2 (console log) in parallel.
-        # Whichever resolves first wins; the other is cancelled.
+        # Strategy 0: Steam real-time stats (fastest, works during the match)
+        if self.steam_api_key and self.dota_path:
+            result = self._try_steam_realtime(match_id, local_steam64)
+            if result and (result[0] or result[1]):
+                return result
+
+        # Run Strategy 1 (STRATZ) and Strategy 2 (console log) in parallel.
         futures: dict = {}
         with _cf.ThreadPoolExecutor(max_workers=2) as pool:
             if self.stratz_token:
@@ -157,14 +184,11 @@ class MatchFinder:
             for fut in _cf.as_completed(futures.values()):
                 result = fut.result()
                 if result and (result[0] or result[1]):
-                    # Cancel remaining futures (best-effort)
                     for other in futures.values():
                         other.cancel()
                     return result
 
-        # Strategy 3: poll OpenDota after match ends.
-        # Note: this is a long-running blocking call (up to 15 min).
-        # The caller is responsible for not blocking new-match detection.
+        # Strategy 3: poll OpenDota after match ends
         result = self._try_post_match_opendota(match_id, local_steam64)
         if result:
             return result
@@ -172,7 +196,125 @@ class MatchFinder:
         logger.warning("All strategies failed. Analyzing local player only.")
         return [local_steam64], []
 
-    # ── Strategy 1: STRATZ Live Match API ────────────────────────────────
+    # ── Strategy 0: Steam GetRealtimeStats ───────────────────────────────
+
+    def _get_server_steam_id(self, match_id: str) -> str | None:
+        """Read console.log and extract the game-server Steam ID for this match."""
+        log_tail = self._read_console_log_tail()
+        if not log_tail:
+            return None
+        for m in _SERVER_STEAMID_RE.finditer(log_tail):
+            if m.group(2) == match_id:
+                return m.group(1)
+        return None
+
+    def _try_steam_realtime(
+        self,
+        match_id: str,
+        local_steam64: str,
+        *,
+        retries: int = 18,
+        interval: float = 10.0,
+    ) -> tuple[list[str], list[str]] | None:
+        """Query Steam GetRealtimeStats using the server Steam ID from console.log.
+
+        This is the only real-time source — returns all 10 players within
+        seconds of match start.  Requires STEAM_API_KEY and -condebug.
+        """
+        server_steam_id = None
+        for attempt in range(1, retries + 1):
+            if not server_steam_id:
+                server_steam_id = self._get_server_steam_id(match_id)
+            if not server_steam_id:
+                logger.info(
+                    f"Steam: server Steam ID not in console.log yet "
+                    f"(attempt {attempt}/{retries}), retrying in {int(interval)}s…"
+                )
+                time.sleep(interval)
+                continue
+
+            try:
+                logger.info(
+                    f"Steam: GetRealtimeStats for server {server_steam_id} "
+                    f"(attempt {attempt}/{retries})…"
+                )
+                resp = requests.get(
+                    STEAM_REALTIME_URL,
+                    params={
+                        "key": self.steam_api_key,
+                        "server_steam_id": server_steam_id,
+                    },
+                    timeout=10,
+                )
+                if resp.status_code == 403:
+                    logger.warning("Steam: API key invalid or not authorised.")
+                    return None
+                if resp.status_code != 200:
+                    logger.warning(f"Steam GetRealtimeStats HTTP {resp.status_code}")
+                    time.sleep(interval)
+                    continue
+
+                data = resp.json()
+                match_data = data.get("match", {})
+
+                # Verify it's the right match
+                api_match_id = str(match_data.get("matchid", ""))
+                if api_match_id and api_match_id != match_id:
+                    logger.warning(
+                        f"Steam: server returned match {api_match_id}, "
+                        f"expected {match_id}. Server may have changed."
+                    )
+                    return None
+
+                teams = match_data.get("teams", [])
+                if not teams:
+                    logger.info("Steam: match data not ready yet, retrying…")
+                    time.sleep(interval)
+                    continue
+
+                return self._parse_steam_realtime(teams, local_steam64)
+
+            except requests.RequestException as exc:
+                logger.warning(f"Steam GetRealtimeStats error: {exc}")
+                time.sleep(interval)
+
+        logger.warning("Steam: exhausted retries for GetRealtimeStats.")
+        return None
+
+    def _parse_steam_realtime(
+        self, teams: list[dict], local_steam64: str
+    ) -> tuple[list[str], list[str]]:
+        """Parse the GetRealtimeStats `teams` array into (teammates, enemies)."""
+        local_account = _steam64_to_account_id(local_steam64)
+
+        # Find which team the local player is on
+        local_team_idx: int | None = None
+        for idx, team in enumerate(teams):
+            for p in team.get("players", []):
+                if p.get("accountid") == local_account:
+                    local_team_idx = idx
+                    break
+            if local_team_idx is not None:
+                break
+
+        teammates, enemies = [], []
+        for idx, team in enumerate(teams):
+            for p in team.get("players", []):
+                account_id = p.get("accountid")
+                if not account_id:
+                    continue
+                steam64 = _account_id_to_steam64(account_id)
+                if local_team_idx is not None:
+                    (teammates if idx == local_team_idx else enemies).append(steam64)
+                else:
+                    (teammates if steam64 == local_steam64 else enemies).append(steam64)
+
+        logger.info(
+            f"Steam GetRealtimeStats: {len(teammates)} teammates, {len(enemies)} enemies."
+        )
+        return teammates, enemies
+
+    # ── Strategy 1: STRATZ post-match query ──────────────────────────────
 
     def _try_stratz(
         self,
