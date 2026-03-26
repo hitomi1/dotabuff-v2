@@ -2,8 +2,8 @@
 
 'use strict';
 
-// ── Constants ────────────────────────────────────────────────────────────────
-const TOTAL_PLAYERS = 10;
+// ── State ─────────────────────────────────────────────────────────────────────
+let totalPlayers  = 10;
 let playersLoaded = 0;
 
 // ── DOM references ───────────────────────────────────────────────────────────
@@ -72,16 +72,18 @@ function handleStatus(data) {
 
 function handleMatchDetected(data) {
   playersLoaded = 0;
-  const n = (data.n_teammates || 5) + (data.n_enemies || 5);
-  setStatus('connected', `Fetching player data… (0/${n})`);
+  const nTeam   = data.n_teammates || 0;
+  const nEnemy  = data.n_enemies   || 0;
+  totalPlayers  = nTeam + nEnemy || 10;
+  setStatus('connected', `Fetching player data… (0/${totalPlayers})`);
 
   // Clear columns and populate with skeletons
   listYours.innerHTML = '';
   listEnemy.innerHTML = '';
-  for (let i = 0; i < (data.n_teammates || 5); i++) {
+  for (let i = 0; i < nTeam; i++) {
     listYours.insertAdjacentHTML('beforeend', renderSkeleton());
   }
-  for (let i = 0; i < (data.n_enemies || 5); i++) {
+  for (let i = 0; i < nEnemy; i++) {
     listEnemy.insertAdjacentHTML('beforeend', renderSkeleton());
   }
 
@@ -90,7 +92,6 @@ function handleMatchDetected(data) {
 
 function handlePlayerData(data) {
   playersLoaded += 1;
-  const total = TOTAL_PLAYERS;
 
   const isTeammate = data.team === 'teammate';
   const list = isTeammate ? listYours : listEnemy;
@@ -109,10 +110,10 @@ function handlePlayerData(data) {
     list.insertAdjacentHTML('beforeend', html);
   }
 
-  if (playersLoaded >= total) {
+  if (playersLoaded >= totalPlayers) {
     setStatus('connected', 'Match ready ✓');
   } else {
-    setStatus('connected', `Fetching player data… (${playersLoaded}/${total})`);
+    setStatus('connected', `Fetching player data… (${playersLoaded}/${totalPlayers})`);
   }
 }
 

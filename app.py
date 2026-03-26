@@ -216,14 +216,29 @@ def _run_analysis(match_id: str, local_steam64: str):
                 sid = future_map[future]
                 try:
                     player_data = future.result()
-                    if player_data is None:
-                        continue
-                    player_data["team"] = team_map.get(sid, "enemy")
-                    player_data["is_you"] = (sid == str(local_steam64))
-                    _broadcast("player_data", player_data)
-                    logger.info(f"Broadcast player_data for {sid}")
                 except Exception as exc:
                     logger.error(f"Failed to fetch player {sid}: {exc}")
+                    player_data = None
+
+                if player_data is None:
+                    # Still broadcast a stub so the skeleton is replaced
+                    account_id = int(sid) - 76561197960265728
+                    player_data = {
+                        "profile": {
+                            "name": f"Player {sid[-4:]}",
+                            "rank": "Unknown",
+                            "dotabuff_url": f"https://www.dotabuff.com/players/{account_id}",
+                            "opendota_url": f"https://www.opendota.com/players/{account_id}",
+                        },
+                        "matches": [],
+                        "top_heroes": [],
+                        "main_role": "Unknown",
+                    }
+
+                player_data["team"] = team_map.get(sid, "enemy")
+                player_data["is_you"] = (sid == str(local_steam64))
+                _broadcast("player_data", player_data)
+                logger.info(f"Broadcast player_data for {sid}")
 
         logger.info(f"Analysis complete for match {match_id}.")
     except Exception as exc:
@@ -241,7 +256,9 @@ def main():
     parser.add_argument("--api-key", default=None,
                         help="OpenDota API key (optional, raises rate limit)")
     parser.add_argument("--stratz-token", default=None,
-                        help="STRATZ API token for live match lookups")
+                        help="STRATZ API token for post-match lookups")
+    parser.add_argument("--steam-api-key", default=None,
+                        help="Steam Web API key for real-time player lookup (steamcommunity.com/dev/apikey)")
     parser.add_argument("--dota-path", default=None,
                         help="Path to Dota 2 game/dota directory (for console.log parsing)")
     parser.add_argument("--debug", action="store_true",
@@ -254,6 +271,7 @@ def main():
     _client = OpenDotaClient(api_key=args.api_key)
     _finder = MatchFinder(
         stratz_token=args.stratz_token,
+        steam_api_key=args.steam_api_key,
         dota_path=args.dota_path,
     )
 
