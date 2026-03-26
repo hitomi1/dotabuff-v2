@@ -41,13 +41,19 @@ class OpenDotaClient:
         self.api_key = api_key
         self.session = requests.Session()
         self.session.headers.update({"User-Agent": "dota2-match-analyzer/1.0"})
-        self.heroes: dict[int, str] = {}
+        self.heroes: dict[int, dict] = {}
         self._load_heroes()
 
     def _load_heroes(self):
         data = self._get("/heroes")
         if data:
-            self.heroes = {h["id"]: h["localized_name"] for h in data}
+            self.heroes = {
+                h["id"]: {
+                    "localized_name": h["localized_name"],
+                    "img_name": h.get("name", "").replace("npc_dota_hero_", ""),
+                }
+                for h in data
+            }
             logger.info(f"Loaded {len(self.heroes)} heroes.")
         else:
             logger.warning("Could not load hero list from OpenDota.")
@@ -80,7 +86,19 @@ class OpenDotaClient:
     # ------------------------------------------------------------------ #
 
     def _hero_name(self, hero_id: int) -> str:
-        return self.heroes.get(hero_id, f"Hero #{hero_id}")
+        h = self.heroes.get(hero_id)
+        if h:
+            return h["localized_name"]
+        return f"Hero #{hero_id}"
+
+    def _hero_img(self, hero_id: int) -> str:
+        h = self.heroes.get(hero_id)
+        if h and h.get("img_name"):
+            return (
+                f"https://cdn.cloudflare.steamstatic.com/apps/dota2/images"
+                f"/dota_react/heroes/{h['img_name']}.png"
+            )
+        return ""
 
     def _parse_matches(self, raw: list) -> list[dict]:
         matches = []
@@ -89,9 +107,11 @@ class OpenDotaClient:
             radiant_win = m.get("radiant_win")
             won = (radiant_win is True) == (slot < 128)
             secs = m.get("duration", 0)
+            hero_id = m.get("hero_id", 0)
             matches.append({
                 "match_id": m.get("match_id"),
-                "hero": self._hero_name(m.get("hero_id", 0)),
+                "hero": self._hero_name(hero_id),
+                "hero_img": self._hero_img(hero_id),
                 "result": "Win" if won else "Loss",
                 "kills": m.get("kills", 0),
                 "deaths": m.get("deaths", 0),
@@ -109,8 +129,10 @@ class OpenDotaClient:
             games = h.get("games", 0)
             wins = h.get("win", 0)
             winrate = f"{wins / games * 100:.1f}%" if games > 0 else "N/A"
+            hero_id = h.get("hero_id", 0)
             heroes.append({
-                "hero": self._hero_name(h.get("hero_id", 0)),
+                "hero": self._hero_name(hero_id),
+                "img": self._hero_img(hero_id),
                 "games": games,
                 "wins": wins,
                 "winrate": winrate,
@@ -154,6 +176,7 @@ class OpenDotaClient:
                 "account_id": account_id,
                 "dotabuff_url": f"https://www.dotabuff.com/players/{account_id}",
                 "opendota_url": f"https://www.opendota.com/players/{account_id}",
+                "avatar": p.get("avatarmedium", "") or p.get("avatarfull", ""),
             }
         else:
             profile = {
