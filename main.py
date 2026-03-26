@@ -23,6 +23,7 @@ import sys
 
 from display import Display
 from gsi_server import GSIServer
+from match_finder import MatchFinder
 from opendota import OpenDotaClient
 
 logging.basicConfig(
@@ -39,6 +40,10 @@ def main():
                         help="GSI listener port (default: 4000)")
     parser.add_argument("--api-key", default=None,
                         help="OpenDota API key (optional, increases rate limit)")
+    parser.add_argument("--stratz-token", default=None,
+                        help="STRATZ API token for live match lookups")
+    parser.add_argument("--dota-path", default=None,
+                        help="Path to Dota 2 game/dota directory (for console.log parsing)")
     parser.add_argument("--debug",   action="store_true",
                         help="Enable debug logging")
     args = parser.parse_args()
@@ -48,6 +53,10 @@ def main():
 
     display = Display()
     client  = OpenDotaClient(api_key=args.api_key)
+    finder  = MatchFinder(
+        stratz_token=args.stratz_token,
+        dota_path=args.dota_path,
+    )
 
     def on_match_found(local_steam64: str, teammates: list, enemies: list):
         display.match_detected(len(teammates), len(enemies))
@@ -57,7 +66,11 @@ def main():
 
         display.results(local_steam64, player_data, teammates, enemies)
 
-    server = GSIServer(port=args.port, on_match_found=on_match_found)
+    server = GSIServer(
+        port=args.port,
+        on_match_found=on_match_found,
+        match_finder=finder,
+    )
 
     display.banner()
     logger.info(f"GSI server listening on http://127.0.0.1:{args.port}/")

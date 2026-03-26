@@ -10,6 +10,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from flask import Flask, Response, render_template, request
 
 from gsi_server import ACTIVE_STATES, AUTH_TOKEN
+from match_finder import MatchFinder
 from opendota import OpenDotaClient
 
 logging.basicConfig(
@@ -18,7 +19,7 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 logger = logging.getLogger(__name__)
-logging.getLogger("werkzeug").setLevel(logging.WARNING)
+logging.getLogger("werkzeug").setLevel(logging.INFO)
 
 app = Flask(__name__)
 
@@ -31,8 +32,9 @@ _current_match_id: str | None = None
 _analyzing: bool = False
 _gsi_lock = threading.Lock()
 
-# ── OpenDota client (initialised in main) ─────────────────────────────────────
+# ── OpenDota client & match finder (initialised in main) ──────────────────────
 _client: OpenDotaClient | None = None
+_finder: MatchFinder | None = None
 
 
 # ── SSE helpers ───────────────────────────────────────────────────────────────
@@ -109,12 +111,19 @@ def stream():
 def gsi():
     data = request.get_json(silent=True, force=True)
     if not data:
+        logger.warning("GSI: received empty/non-JSON payload.")
         return "OK", 200
 
     auth = data.get("auth", {})
     if auth.get("token") != AUTH_TOKEN:
-        logger.warning("GSI: invalid auth token – ignoring payload.")
+        logger.warning(f"GSI: invalid auth token '{auth.get('token')}' – ignoring.")
         return "Unauthorized", 401
+
+    map_data  = data.get("map", {})
+    game_state = map_data.get("game_state", "—")
+    match_id   = map_data.get("matchid", "—")
+    n_players  = len(data.get("allplayers", {}))
+    logger.info(f"GSI ▶ state={game_state}  match={match_id}  players={n_players}/10")
 
     try:
         _process_gsi(data)
@@ -143,41 +152,8 @@ def _process_gsi(data: dict):
         local_player = data.get("player", {})
         local_steam64 = str(local_player.get("steamid", ""))
 
-        allplayers = data.get("allplayers", {})
-        if len(allplayers) < 10:
-            logger.debug(f"GSI: only {len(allplayers)}/10 players visible – waiting.")
-            return
-
-        steam_ids: dict[int, str] = {}
-        for key, pdata in allplayers.items():
-            try:
-                slot = int(key.replace("player", ""))
-                sid = str(pdata.get("steamid", ""))
-                if sid and sid != "0":
-                    steam_ids[slot] = sid
-            except ValueError:
-                continue
-
-        if len(steam_ids) < 10:
-            logger.debug(f"GSI: only {len(steam_ids)}/10 Steam IDs – waiting.")
-            return
-
-        local_slot = next(
-            (slot for slot, sid in steam_ids.items() if sid == local_steam64),
-            None,
-        )
-
-        if local_slot is not None:
-            my_team_slots = set(range(0, 5)) if local_slot < 5 else set(range(5, 10))
-            enemy_team_slots = set(range(5, 10)) if local_slot < 5 else set(range(0, 5))
-        else:
-            my_team_slots = {slot for slot, sid in steam_ids.items() if sid == local_steam64}
-            enemy_team_slots = set(steam_ids.keys()) - my_team_slots
-
-        teammates = [steam_ids[s] for s in sorted(my_team_slots) if s in steam_ids]
-        enemies = [steam_ids[s] for s in sorted(enemy_team_slots) if s in steam_ids]
-
-        if not teammates or not enemies:
+        if not local_steam64 or local_steam64 == "0":
+            logger.debug("GSI: no local player Steam ID yet – waiting.")
             return
 
         _current_match_id = match_id
@@ -186,16 +162,27 @@ def _process_gsi(data: dict):
     logger.info(f"GSI: new match {match_id} – launching analysis thread.")
     thread = threading.Thread(
         target=_run_analysis,
-        args=(match_id, local_steam64, teammates, enemies),
+        args=(match_id, local_steam64),
         daemon=True,
     )
     thread.start()
 
 
-def _run_analysis(match_id: str, local_steam64: str, teammates: list, enemies: list):
+def _run_analysis(match_id: str, local_steam64: str):
     global _analyzing
     try:
-        # Immediately notify clients
+        if _client is None or _finder is None:
+            logger.error("OpenDota client or MatchFinder not initialised.")
+            return
+
+        # Discover all players using STRATZ / console-log fallback
+        _broadcast("status", {"status": "discovering"})
+        logger.info("Discovering players via MatchFinder…")
+        teammates, enemies = _finder.find_players(
+            match_id, local_steam64,
+        )
+
+        # Notify clients of the match
         _broadcast("match_detected", {
             "match_id": match_id,
             "n_teammates": len(teammates),
@@ -210,10 +197,6 @@ def _run_analysis(match_id: str, local_steam64: str, teammates: list, enemies: l
             team_map[str(sid)] = "enemy"
 
         all_ids = list(dict.fromkeys(teammates + enemies))
-
-        if _client is None:
-            logger.error("OpenDota client not initialised.")
-            return
 
         # Fetch all players concurrently, broadcast each one as it arrives
         with ThreadPoolExecutor(max_workers=5) as executor:
@@ -241,13 +224,17 @@ def _run_analysis(match_id: str, local_steam64: str, teammates: list, enemies: l
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 def main():
-    global _client
+    global _client, _finder
 
     parser = argparse.ArgumentParser(description="Dota 2 Match Analyzer – Web UI")
     parser.add_argument("--port", type=int, default=5000,
                         help="HTTP port (default: 5000)")
     parser.add_argument("--api-key", default=None,
                         help="OpenDota API key (optional, raises rate limit)")
+    parser.add_argument("--stratz-token", default=None,
+                        help="STRATZ API token for live match lookups")
+    parser.add_argument("--dota-path", default=None,
+                        help="Path to Dota 2 game/dota directory (for console.log parsing)")
     parser.add_argument("--debug", action="store_true",
                         help="Enable debug logging")
     args = parser.parse_args()
@@ -256,6 +243,10 @@ def main():
         logging.getLogger().setLevel(logging.DEBUG)
 
     _client = OpenDotaClient(api_key=args.api_key)
+    _finder = MatchFinder(
+        stratz_token=args.stratz_token,
+        dota_path=args.dota_path,
+    )
 
     print(f"Web UI → http://localhost:{args.port}")
     app.run(host="0.0.0.0", port=args.port, debug=args.debug, use_reloader=False)
