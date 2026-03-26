@@ -175,13 +175,23 @@ def _run_analysis(match_id: str, local_steam64: str):
             logger.error("OpenDota client or MatchFinder not initialised.")
             return
 
-        # Discover all players using STRATZ / console-log fallback
+        # Discover all players using STRATZ / console-log fallback.
+        # This can block for up to ~2 min (STRATZ) or 15 min (OpenDota fallback).
         _broadcast("status", {"status": "discovering"})
         logger.info("Discovering players via MatchFinder…")
         teammates, enemies = _finder.find_players(
             match_id, local_steam64,
         )
+    except Exception as exc:
+        logger.error(f"Player discovery error: {exc}", exc_info=True)
+        teammates, enemies = [local_steam64], []
+    finally:
+        # Release the analyzing lock as soon as discovery finishes so that a
+        # new match can be detected while we're still fetching profile data.
+        with _gsi_lock:
+            _analyzing = False
 
+    try:
         # Notify clients of the match
         _broadcast("match_detected", {
             "match_id": match_id,
@@ -216,9 +226,8 @@ def _run_analysis(match_id: str, local_steam64: str):
                     logger.error(f"Failed to fetch player {sid}: {exc}")
 
         logger.info(f"Analysis complete for match {match_id}.")
-    finally:
-        with _gsi_lock:
-            _analyzing = False
+    except Exception as exc:
+        logger.error(f"Analysis error for match {match_id}: {exc}", exc_info=True)
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────

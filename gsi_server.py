@@ -100,12 +100,15 @@ class GSIServer:
                 )
             else:
                 teammates, enemies = [local_steam64], []
-
-            if self.on_match_found:
-                self.on_match_found(local_steam64, teammates, enemies)
+        except Exception as exc:
+            logger.error(f"Player discovery error: {exc}", exc_info=True)
+            teammates, enemies = [local_steam64], []
         finally:
             with self._lock:
                 self._analyzing = False
+
+        if self.on_match_found:
+            self.on_match_found(local_steam64, teammates, enemies)
 
     # ------------------------------------------------------------------ #
 
