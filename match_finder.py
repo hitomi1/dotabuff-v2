@@ -139,21 +139,30 @@ class MatchFinder:
 
         Tries three strategies in order, falling back if each fails.
         """
-        # Strategy 1: STRATZ live match
-        if self.stratz_token:
-            result = self._try_stratz(
-                match_id, local_steam64, stratz_retries, stratz_interval
-            )
-            if result:
-                return result
+        import concurrent.futures as _cf
 
-        # Strategy 2: console.log player table + STRATZ name search
-        if self.dota_path:
-            result = self._try_console_log_with_name_search(
-                match_id, local_steam64
-            )
-            if result:
-                return result
+        # Run Strategy 1 (STRATZ live) and Strategy 2 (console log) in parallel.
+        # Whichever resolves first wins; the other is cancelled.
+        futures: dict = {}
+        with _cf.ThreadPoolExecutor(max_workers=2) as pool:
+            if self.stratz_token:
+                futures["stratz"] = pool.submit(
+                    self._try_stratz,
+                    match_id, local_steam64, stratz_retries, stratz_interval,
+                )
+            if self.dota_path:
+                futures["console"] = pool.submit(
+                    self._try_console_log_with_name_search,
+                    match_id, local_steam64,
+                )
+
+            for fut in _cf.as_completed(futures.values()):
+                result = fut.result()
+                if result and (result[0] or result[1]):
+                    # Cancel remaining futures (best-effort)
+                    for other in futures.values():
+                        other.cancel()
+                    return result
 
         # Strategy 3: poll OpenDota after match ends
         result = self._try_post_match_opendota(match_id, local_steam64)
@@ -363,15 +372,33 @@ class MatchFinder:
         return None
 
     def _try_console_log_with_name_search(
-        self, match_id: str, local_steam64: str
+        self, match_id: str, local_steam64: str,
+        *,
+        retries: int = 12,
+        interval: float = 10.0,
     ) -> tuple[list[str], list[str]] | None:
-        """Parse console.log player table, resolve names via STRATZ search."""
-        log_tail = self._read_console_log_tail()
-        if not log_tail:
-            return None
+        """Parse console.log player table, resolve names via STRATZ search.
 
-        slot_names = self._parse_player_table(log_tail, match_id)
+        Retries because the player table is written only after all 10 players
+        have fully loaded into the game server (~30-90s after match start).
+        """
+        slot_names = None
+        for attempt in range(1, retries + 1):
+            log_tail = self._read_console_log_tail()
+            if log_tail:
+                slot_names = self._parse_player_table(log_tail, match_id)
+            if slot_names:
+                break
+            logger.info(
+                f"Console log: player table not ready yet "
+                f"(attempt {attempt}/{retries}), retrying in {int(interval)}s…"
+            )
+            time.sleep(interval)
+
         if not slot_names:
+            logger.warning(
+                f"Console log: player table for match {match_id} never appeared."
+            )
             return None
 
         # Resolve each name to a steam64 ID via STRATZ search
