@@ -258,15 +258,17 @@ class MatchFinder:
                 match_data = data.get("match", {})
 
                 # Verify it's the right match
-                api_match_id = str(match_data.get("matchid", ""))
-                if api_match_id and api_match_id != match_id:
+                # API returns match_id as string in the "match" object
+                api_match_id = str(match_data.get("match_id", match_data.get("matchid", "")))
+                if api_match_id and api_match_id != "0" and api_match_id != match_id:
                     logger.warning(
                         f"Steam: server returned match {api_match_id}, "
                         f"expected {match_id}. Server may have changed."
                     )
                     return None
 
-                teams = match_data.get("teams", [])
+                # "teams" is at the top level, not inside "match"
+                teams = data.get("teams", [])
                 if not teams:
                     logger.info("Steam: match data not ready yet, retrying…")
                     time.sleep(interval)
