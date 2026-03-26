@@ -175,31 +175,56 @@ def _run_analysis(match_id: str, local_steam64: str):
             logger.error("OpenDota client or MatchFinder not initialised.")
             return
 
-        # Discover all players using STRATZ / console-log fallback.
-        # This can block for up to ~2 min (STRATZ) or 15 min (OpenDota fallback).
+        # Phase 1: discover all players (blocks for up to ~17 min total)
         _broadcast("status", {"status": "discovering"})
         logger.info("Discovering players via MatchFinder…")
-        teammates, enemies = _finder.find_players(
-            match_id, local_steam64,
-        )
+        teammates, enemies = _finder.find_players(match_id, local_steam64)
     except Exception as exc:
         logger.error(f"Player discovery error: {exc}", exc_info=True)
         teammates, enemies = [local_steam64], []
     finally:
-        # Release the analyzing lock as soon as discovery finishes so that a
-        # new match can be detected while we're still fetching profile data.
+        # Release lock so a new match can be detected during Phase 2 retry
         with _gsi_lock:
             _analyzing = False
 
+    # Phase 2: if only the local player was found (all strategies failed),
+    # keep retrying STRATZ every 2 min until the match ends and gets indexed.
+    if not enemies and set(teammates) == {local_steam64}:
+        logger.info(
+            f"Discovery failed for {match_id}; "
+            f"will retry STRATZ every 2 min (up to 60 min) after match ends…"
+        )
+        for attempt in range(1, 31):
+            time.sleep(120)
+            # A new match started — stop retrying the old one
+            if _current_match_id != match_id:
+                logger.info(f"New match detected; stopping retry for {match_id}.")
+                return
+            if _finder is None:
+                break
+            logger.info(f"STRATZ retry {attempt}/30 for match {match_id}…")
+            result = _finder._try_stratz(match_id, local_steam64, retries=3, interval=10)
+            if result and (result[0] or result[1]):
+                teammates, enemies = result
+                logger.info(
+                    f"Retry succeeded: {len(teammates)} teammates, {len(enemies)} enemies."
+                )
+                break
+        else:
+            logger.warning(f"All STRATZ retries exhausted for {match_id}.")
+
+    # If a new match started while we were retrying, don't overwrite its display
+    if _current_match_id != match_id and _current_match_id is not None:
+        logger.info(f"Match {match_id} results discarded — new match in progress.")
+        return
+
     try:
-        # Notify clients of the match
         _broadcast("match_detected", {
             "match_id": match_id,
             "n_teammates": len(teammates),
             "n_enemies": len(enemies),
         })
 
-        # Map each steam64 id → team label
         team_map: dict[str, str] = {}
         for sid in teammates:
             team_map[str(sid)] = "teammate"
@@ -208,7 +233,6 @@ def _run_analysis(match_id: str, local_steam64: str):
 
         all_ids = list(dict.fromkeys(teammates + enemies))
 
-        # Fetch all players concurrently, broadcast each one as it arrives
         with ThreadPoolExecutor(max_workers=5) as executor:
             future_map = {executor.submit(_client.get_player, sid): str(sid)
                          for sid in all_ids}
@@ -221,7 +245,6 @@ def _run_analysis(match_id: str, local_steam64: str):
                     player_data = None
 
                 if player_data is None:
-                    # Still broadcast a stub so the skeleton is replaced
                     account_id = int(sid) - 76561197960265728
                     player_data = {
                         "profile": {
