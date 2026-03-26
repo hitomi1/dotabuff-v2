@@ -6,6 +6,8 @@ from typing import Callable
 
 from flask import Flask, request
 
+from match_finder import MatchFinder
+
 logger = logging.getLogger(__name__)
 
 # Game states that indicate a real match is starting / in progress
@@ -24,9 +26,11 @@ class GSIServer:
     match is detected and all 10 player Steam IDs are available."""
 
     def __init__(self, port: int = 4000,
-                 on_match_found: Callable | None = None):
+                 on_match_found: Callable | None = None,
+                 match_finder: MatchFinder | None = None):
         self.port = port
         self.on_match_found = on_match_found
+        self.match_finder = match_finder
 
         self._current_match_id: str | None = None
         self._analyzing = False
@@ -72,48 +76,8 @@ class GSIServer:
             local_player = data.get("player", {})
             local_steam64 = str(local_player.get("steamid", ""))
 
-            # Extract all 10 players from the allplayers block
-            allplayers = data.get("allplayers", {})
-            if len(allplayers) < 10:
-                logger.debug(
-                    f"GSI: only {len(allplayers)}/10 players visible yet – waiting.")
-                return
-
-            steam_ids = {}
-            for key, pdata in allplayers.items():
-                try:
-                    slot = int(key.replace("player", ""))
-                    sid  = str(pdata.get("steamid", ""))
-                    if sid and sid != "0":
-                        steam_ids[slot] = sid
-                except ValueError:
-                    continue
-
-            if len(steam_ids) < 10:
-                logger.debug(
-                    f"GSI: only {len(steam_ids)}/10 Steam IDs populated – waiting.")
-                return
-
-            # Determine which team the local player is on
-            local_slot = next(
-                (slot for slot, sid in steam_ids.items() if sid == local_steam64),
-                None,
-            )
-
-            # Slots 0-4 → one team, 5-9 → other team
-            if local_slot is not None:
-                my_team_slots   = set(range(0, 5)) if local_slot < 5 else set(range(5, 10))
-                enemy_team_slots = set(range(5, 10)) if local_slot < 5 else set(range(0, 5))
-            else:
-                # Can't determine teams – treat all as enemies except local
-                my_team_slots   = {slot for slot, sid in steam_ids.items()
-                                   if sid == local_steam64}
-                enemy_team_slots = set(steam_ids.keys()) - my_team_slots
-
-            teammates = [steam_ids[s] for s in sorted(my_team_slots)   if s in steam_ids]
-            enemies   = [steam_ids[s] for s in sorted(enemy_team_slots) if s in steam_ids]
-
-            if not teammates or not enemies:
+            if not local_steam64 or local_steam64 == "0":
+                logger.debug("GSI: no local player Steam ID yet – waiting.")
                 return
 
             self._current_match_id = match_id
@@ -122,13 +86,21 @@ class GSIServer:
         logger.info(f"GSI: new match {match_id} – starting analysis.")
         thread = threading.Thread(
             target=self._run_analysis,
-            args=(local_steam64, teammates, enemies),
+            args=(match_id, local_steam64),
             daemon=True,
         )
         thread.start()
 
-    def _run_analysis(self, local_steam64: str, teammates: list, enemies: list):
+    def _run_analysis(self, match_id: str, local_steam64: str):
         try:
+            if self.match_finder:
+                logger.info("Discovering players via MatchFinder…")
+                teammates, enemies = self.match_finder.find_players(
+                    match_id, local_steam64,
+                )
+            else:
+                teammates, enemies = [local_steam64], []
+
             if self.on_match_found:
                 self.on_match_found(local_steam64, teammates, enemies)
         finally:
