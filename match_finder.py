@@ -73,17 +73,15 @@ _DEFAULT_DOTA_PATHS: dict[str, list[str]] = {
 
 STRATZ_GQL_URL = "https://api.stratz.com/graphql"
 
-# GraphQL query to fetch live-match players from STRATZ
-_LIVE_MATCH_QUERY = """
-query($matchId: Long!) {
-  live {
-    match(id: $matchId) {
-      matchId
-      players {
-        steamAccountId
-        isRadiant
-        heroId
-      }
+# Query match players directly — works for both live and finished matches.
+# STRATZ indexes matchmaking games within ~2 min of start.
+_MATCH_QUERY = """
+query GetMatch($matchId: Long!) {
+  match(id: $matchId) {
+    id
+    players {
+      steamAccountId
+      isRadiant
     }
   }
 }
@@ -132,7 +130,7 @@ class MatchFinder:
         match_id: str,
         local_steam64: str,
         *,
-        stratz_retries: int = 5,
+        stratz_retries: int = 12,
         stratz_interval: float = 10.0,
     ) -> tuple[list[str], list[str]]:
         """Return ``(teammates, enemies)`` lists of Steam-64 IDs.
@@ -141,7 +139,7 @@ class MatchFinder:
         """
         import concurrent.futures as _cf
 
-        # Run Strategy 1 (STRATZ live) and Strategy 2 (console log) in parallel.
+        # Run Strategy 1 (STRATZ match query) and Strategy 2 (console log) in parallel.
         # Whichever resolves first wins; the other is cancelled.
         futures: dict = {}
         with _cf.ThreadPoolExecutor(max_workers=2) as pool:
@@ -164,7 +162,9 @@ class MatchFinder:
                         other.cancel()
                     return result
 
-        # Strategy 3: poll OpenDota after match ends
+        # Strategy 3: poll OpenDota after match ends.
+        # Note: this is a long-running blocking call (up to 15 min).
+        # The caller is responsible for not blocking new-match detection.
         result = self._try_post_match_opendota(match_id, local_steam64)
         if result:
             return result
@@ -181,103 +181,75 @@ class MatchFinder:
         retries: int,
         interval: float,
     ) -> tuple[list[str], list[str]] | None:
-        """Query STRATZ for the live match.  Retries because STRATZ may
-        take a few seconds to pick up the match."""
+        """Query STRATZ match(id) endpoint — works for live and finished games.
+        STRATZ indexes matchmaking games within ~2 minutes of start."""
         headers = {
             "Authorization": f"Bearer {self.stratz_token}",
             "Content-Type": "application/json",
-            "User-Agent": "dota2-match-analyzer/2.0",
+            "User-Agent": "STRATZ_API",
         }
 
         for attempt in range(1, retries + 1):
             try:
-                logger.info(
-                    f"STRATZ: querying match {match_id} "
-                    f"(attempt {attempt}/{retries})…"
-                )
+                logger.info(f"STRATZ: querying match {match_id} (attempt {attempt}/{retries})…")
                 resp = requests.post(
                     STRATZ_GQL_URL,
-                    json={
-                        "query": _LIVE_MATCH_QUERY,
-                        "variables": {"matchId": int(match_id)},
-                    },
+                    json={"query": _MATCH_QUERY, "variables": {"matchId": int(match_id)}},
                     headers=headers,
                     timeout=15,
                 )
 
                 if resp.status_code == 429:
-                    logger.warning("STRATZ: rate-limited. Backing off.")
+                    logger.warning("STRATZ: rate-limited, backing off…")
                     time.sleep(interval * 2)
                     continue
 
                 if resp.status_code != 200:
-                    logger.warning(
-                        f"STRATZ: HTTP {resp.status_code} — {resp.text[:200]}"
-                    )
+                    logger.warning(f"STRATZ: HTTP {resp.status_code}")
                     time.sleep(interval)
                     continue
 
-                data = resp.json()
-                match_data = (
-                    data.get("data", {}).get("live", {}).get("match")
-                )
+                match_data = resp.json().get("data", {}).get("match")
+                players = match_data.get("players", []) if match_data else []
 
-                if not match_data or not match_data.get("players"):
-                    logger.info("STRATZ: match not tracked yet, retrying…")
+                if not players:
+                    logger.info("STRATZ: match not indexed yet, retrying…")
                     time.sleep(interval)
                     continue
 
-                return self._parse_stratz_players(
-                    match_data["players"], local_steam64
-                )
+                return self._parse_stratz_players(players, local_steam64)
 
             except requests.RequestException as exc:
                 logger.warning(f"STRATZ request error: {exc}")
                 time.sleep(interval)
 
-        logger.warning("STRATZ: exhausted retries — match not found.")
+        logger.warning("STRATZ: exhausted retries.")
         return None
 
     def _parse_stratz_players(
         self, players: list[dict], local_steam64: str
     ) -> tuple[list[str], list[str]]:
-        """Parse STRATZ player list into (teammates, enemies)."""
         local_account = _steam64_to_account_id(local_steam64)
 
-        # Determine local player's team
         local_is_radiant: bool | None = None
         for p in players:
             if p.get("steamAccountId") == local_account:
                 local_is_radiant = p.get("isRadiant")
                 break
 
-        teammates: list[str] = []
-        enemies: list[str] = []
-
+        teammates, enemies = [], []
         for p in players:
             account_id = p.get("steamAccountId")
             if not account_id:
                 continue
-
             steam64 = _account_id_to_steam64(account_id)
             is_radiant = p.get("isRadiant")
-
             if local_is_radiant is not None:
-                if is_radiant == local_is_radiant:
-                    teammates.append(steam64)
-                else:
-                    enemies.append(steam64)
+                (teammates if is_radiant == local_is_radiant else enemies).append(steam64)
             else:
-                # Can't determine teams — put everyone except local in enemies
-                if steam64 == local_steam64:
-                    teammates.append(steam64)
-                else:
-                    enemies.append(steam64)
+                (teammates if steam64 == local_steam64 else enemies).append(steam64)
 
-        logger.info(
-            f"STRATZ: found {len(teammates)} teammates, "
-            f"{len(enemies)} enemies."
-        )
+        logger.info(f"STRATZ match query: {len(teammates)} teammates, {len(enemies)} enemies.")
         return teammates, enemies
 
     # ── Strategy 2: Console-log player table + STRATZ name search ────────
