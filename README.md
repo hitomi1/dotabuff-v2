@@ -1,15 +1,38 @@
 # Dota 2 Match Analyzer
 
-A background tool that automatically identifies every player in your Dota 2 match the moment hero selection begins. For each teammate and enemy it fetches their **Dotabuff page**, **last 20 matches**, **top 10 most played heroes**, and **main role** — all displayed in a color-coded terminal report.
+A local web app that automatically identifies all 10 players the moment your match begins — showing each player's rank, ranked win rate, top heroes, and recent matches in a clean browser UI, inspired by OP.GG and Mobalytics.
+
+No manual input. No browser extensions. Just start the app, play Dota, and your browser updates itself.
+
+![screenshot placeholder]
+
+---
+
+## Features
+
+- Detects your match automatically via Dota 2 **Game State Integration (GSI)**
+- Identifies all **10 players** (teammates + enemies) using multiple real-time strategies
+- For each player shows:
+  - Steam avatar, name, and current rank
+  - **Ranked win rate** with games played
+  - Recent match win rate (last 20 games) with visual bar
+  - Top 10 most played heroes with win %
+  - Last 20 matches with hero, K/D/A, duration, result
+  - Links to Dotabuff and OpenDota
+- Live streaming UI — cards appear one by one as data arrives
+- Works on **Windows + WSL2**, Linux, and macOS
 
 ---
 
 ## How it works
 
-1. Dota 2's **Game State Integration (GSI)** sends live match data to a local HTTP server on port `4000`
-2. The moment hero selection starts, the tool reads all 10 players' Steam IDs
-3. It queries the **OpenDota API** concurrently to fetch each player's stats
-4. Results are printed to your terminal — teammates in cyan, enemies in red
+1. Dota 2 sends live game state to a local HTTP server via GSI
+2. When a match is detected, the tool finds all 10 player Steam IDs using:
+   - **Steam GetRealtimeStats** — real-time lookup during the match (fastest, needs Steam Web API key)
+   - **STRATZ GraphQL** — post-match lookup (~2 min after the game ends)
+   - **OpenDota polling** — fallback for up to 15 min after match ends
+3. Player stats are fetched concurrently from the OpenDota API
+4. Results stream to your browser in real time via Server-Sent Events (SSE)
 
 ---
 
@@ -17,7 +40,8 @@ A background tool that automatically identifies every player in your Dota 2 matc
 
 - Python 3.10+
 - A Dota 2 installation (Steam)
-- Internet connection
+- A free [STRATZ API token](https://stratz.com/api) (recommended)
+- A free [Steam Web API key](https://steamcommunity.com/dev/apikey) (recommended, for real-time detection)
 
 ---
 
@@ -26,7 +50,7 @@ A background tool that automatically identifies every player in your Dota 2 matc
 **1. Clone the repository**
 
 ```bash
-git clone https://github.com/hitomi1/dotabuff-v2.git
+git clone https://github.com/yourusername/dotabuff-v2.git
 cd dotabuff-v2
 ```
 
@@ -36,92 +60,68 @@ cd dotabuff-v2
 pip install -r requirements.txt
 ```
 
-**3. Copy the GSI config into your Dota 2 folder (one-time setup)**
+**3. Copy the GSI config into your Dota 2 folder (one-time)**
 
 This tells Dota 2 to send game state data to the local server.
 
-**Windows:**
+Windows:
 ```
 C:\Program Files (x86)\Steam\steamapps\common\dota 2 beta\game\dota\cfg\gamestate_integration\
 ```
 
-**Linux / macOS:**
+Linux / macOS:
 ```
 ~/.steam/steam/steamapps/common/dota 2 beta/game/dota/cfg/gamestate_integration/
 ```
 
 Copy `gamestate_integration_dota2.cfg` from this repo into that folder, then **restart Dota 2**.
 
+**4. (Recommended) Enable real-time player detection**
+
+Add `-condebug` to your Dota 2 launch options in Steam. This lets the app read the game server ID from Dota's console log and identify all 10 players the moment the match starts — without waiting for post-match indexing.
+
+**5. Create a `.env` file with your API keys**
+
+```
+STRATZ_TOKEN=your_stratz_token_here
+STEAM_API_KEY=your_steam_api_key_here
+```
+
+Get a free STRATZ token at [stratz.com/api](https://stratz.com/api).
+Get a free Steam Web API key at [steamcommunity.com/dev/apikey](https://steamcommunity.com/dev/apikey).
+
 ---
 
 ## Usage
 
 ```bash
-python main.py
+python app.py
 ```
 
-With an optional OpenDota API key (higher rate limits):
+Then open **http://localhost:5000** in your browser.
 
-```bash
-python main.py --api-key YOUR_OPENDOTA_KEY
-```
+When you enter hero selection, the page updates automatically. No refresh needed.
 
-Custom port:
-
-```bash
-python main.py --port 4000
-```
-
-The tool runs silently in the background. When you queue and enter hero selection, it will automatically print the full report.
-
----
-
-## Example output
+**Test with a specific match ID (no game required):**
 
 ```
-╭──────────────────────────────────────╮
-│  Dota 2 Match Analyzer               │
-│  Listening on http://127.0.0.1:4000  │
-│  Waiting for a match to begin…       │
-╰──────────────────────────────────────╯
-
-Match detected! Fetching data for 5 teammates and 5 enemies…
-
-──────────────────── YOUR TEAM ─────────────────────
-
-  PlayerOne  |  Ancient 3  |  Role: Mid Lane
-  https://www.dotabuff.com/players/123456789
-  https://www.opendota.com/players/123456789
-
-  Last 20 Matches
-  Date        Hero           Result  K/D/A      Duration  Mode
- ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  2026-03-25  Shadow Fiend   Win     14/3/8     32:11     All Pick
-  2026-03-24  Invoker        Loss    9/7/11     41:55     All Pick
-  ...
-
-  Top 10 Heroes
-  #   Hero           Games  Wins  Win%
- ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  1   Shadow Fiend   142    81    57.0%
-  2   Invoker        98     54    55.1%
-  ...
-
-──────────────────── ENEMY TEAM ────────────────────
-  ...
+http://localhost:5000/test/<match_id>
 ```
 
 ---
 
 ## Configuration
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--port` | `4000` | Port the GSI server listens on |
-| `--api-key` | *(none)* | OpenDota API key for higher rate limits |
-| `--debug` | `false` | Enable verbose debug logging |
+All options can be set in `.env` or passed as CLI flags:
 
-To get an OpenDota API key (free), sign in at [opendota.com](https://www.opendota.com) and go to **Settings → API Key**.
+| Flag | Env var | Description |
+|------|---------|-------------|
+| `--stratz-token` | `STRATZ_TOKEN` | STRATZ token for post-match lookups |
+| `--steam-api-key` | `STEAM_API_KEY` | Steam Web API key for real-time detection |
+| `--api-key` | `OPENDOTA_API_KEY` | OpenDota API key (optional, raises rate limits) |
+| `--port` | — | HTTP port (default: 5000) |
+| `--dota-path` | — | Path to Dota 2 `game/dota` directory (auto-detected) |
+| `--debug` | — | Enable verbose logging |
 
 ---
 
@@ -129,11 +129,19 @@ To get an OpenDota API key (free), sign in at [opendota.com](https://www.opendot
 
 ```
 dotabuff-v2/
-├── main.py                            # Entry point
-├── gsi_server.py                      # GSI HTTP listener (Flask)
+├── app.py                             # Flask web server + SSE streaming
+├── match_finder.py                    # Multi-strategy player discovery
 ├── opendota.py                        # OpenDota API client
+├── gsi_server.py                      # GSI HTTP listener (CLI version)
+├── main.py                            # CLI entry point (terminal output)
 ├── display.py                         # Terminal display (Rich)
+├── static/
+│   ├── app.js                         # Client-side SSE + card rendering
+│   └── style.css                      # Dark theme UI
+├── templates/
+│   └── index.html                     # Main page
 ├── gamestate_integration_dota2.cfg    # Dota 2 GSI config
+├── .env                               # API keys (not committed)
 └── requirements.txt
 ```
 
@@ -141,9 +149,10 @@ dotabuff-v2/
 
 ## Notes
 
-- **Private profiles** — players who have set their Steam profile to private or have not consented to OpenDota tracking will show limited or no data. Their Dotabuff link is still provided.
-- **Rate limits** — without an API key, OpenDota allows 60 requests/minute. Analyzing 10 players requires ~30 requests, well within the limit.
-- The tool only analyzes each match once. If you dodge and re-queue into a new match, it detects the new match ID automatically.
+- **Private profiles** — players with private Steam profiles will show limited data. Their Dotabuff/OpenDota links are still provided.
+- **WSL2 users** — the GSI config uses the WSL2 host IP (`172.x.x.x`). If your WSL2 IP is different, update the `uri` field in `gamestate_integration_dota2.cfg`.
+- **Rate limits** — without an OpenDota API key, the limit is 60 req/min. Analyzing 10 players uses ~40 requests, well within the free tier.
+- The app detects each match only once and ignores repeated GSI pings for the same match ID.
 
 ---
 

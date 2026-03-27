@@ -150,6 +150,7 @@ class MatchFinder:
         *,
         stratz_retries: int = 12,
         stratz_interval: float = 10.0,
+        skip_realtime: bool = False,
     ) -> tuple[list[str], list[str]]:
         """Return ``(teammates, enemies)`` lists of Steam-64 IDs.
 
@@ -162,7 +163,7 @@ class MatchFinder:
         import concurrent.futures as _cf
 
         # Strategy 0: Steam real-time stats (fastest, works during the match)
-        if self.steam_api_key and self.dota_path:
+        if not skip_realtime and self.steam_api_key and self.dota_path:
             result = self._try_steam_realtime(match_id, local_steam64)
             if result and (result[0] or result[1]):
                 return result
@@ -175,7 +176,7 @@ class MatchFinder:
                     self._try_stratz,
                     match_id, local_steam64, stratz_retries, stratz_interval,
                 )
-            if self.dota_path:
+            if not skip_realtime and self.dota_path:
                 futures["console"] = pool.submit(
                     self._try_console_log_with_name_search,
                     match_id, local_steam64,

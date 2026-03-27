@@ -125,6 +125,7 @@ class OpenDotaClient:
 
     def _parse_heroes(self, raw: list) -> list[dict]:
         heroes = []
+        raw = sorted(raw, key=lambda h: h.get("games", 0), reverse=True)
         for h in raw[:10]:
             games = h.get("games", 0)
             wins = h.get("win", 0)
@@ -154,17 +155,19 @@ class OpenDotaClient:
     def get_player(self, steam64_id: str | int) -> dict:
         account_id = steam64_to_account_id(steam64_id)
 
-        # Fire 3 requests concurrently per player
-        with ThreadPoolExecutor(max_workers=3) as ex:
+        # Fire 4 requests concurrently per player
+        with ThreadPoolExecutor(max_workers=4) as ex:
             f_profile = ex.submit(self._get, f"/players/{account_id}")
             f_matches = ex.submit(self._get, f"/players/{account_id}/matches",
                                   {"limit": 20, "significant": 0})
-            f_heroes  = ex.submit(self._get, f"/players/{account_id}/heroes",
-                                  {"limit": 10})
+            f_heroes  = ex.submit(self._get, f"/players/{account_id}/heroes")
+            f_ranked  = ex.submit(self._get, f"/players/{account_id}/wl",
+                                  {"lobby_type": 7})
 
         profile_raw = f_profile.result()
         matches_raw = f_matches.result() or []
         heroes_raw  = f_heroes.result()  or []
+        ranked_raw  = f_ranked.result()  or {}
 
         # Profile
         if profile_raw:
@@ -191,12 +194,21 @@ class OpenDotaClient:
         top_heroes = self._parse_heroes(heroes_raw)
         main_role = self._infer_role(matches)
 
+        ranked_wins  = ranked_raw.get("win", 0)
+        ranked_losses = ranked_raw.get("lose", 0)
+        ranked_total = ranked_wins + ranked_losses
+        ranked_pct   = round(ranked_wins / ranked_total * 100) if ranked_total else None
+
         return {
             "steam64_id": str(steam64_id),
             "profile": profile,
             "matches": matches,
             "top_heroes": top_heroes,
             "main_role": main_role,
+            "ranked_wins": ranked_wins,
+            "ranked_losses": ranked_losses,
+            "ranked_total": ranked_total,
+            "ranked_pct": ranked_pct,
         }
 
     def get_all_players(self, steam64_ids: list, max_workers: int = 5) -> dict[str, dict]:

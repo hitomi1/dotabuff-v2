@@ -142,6 +142,13 @@ function renderPlayerCard(player, teamColor) {
   const rankClass = getRankClass(rank);
   const youBadge  = isYou ? `<span class="badge-you">YOU</span>` : '';
 
+  // Ranked win rate
+  const rankedPct   = player.ranked_pct   != null ? player.ranked_pct   : null;
+  const rankedTotal = player.ranked_total != null ? player.ranked_total : 0;
+  const rankedStr   = rankedPct !== null
+    ? `${rankedPct}% (${rankedTotal} ranked)`
+    : '';
+
   // Avatar
   let avatarHtml;
   if (avatarUrl) {
@@ -194,6 +201,7 @@ function renderPlayerCard(player, teamColor) {
           <span class="wr-record">${wins}W ${losses}L</span>
           <span class="wr-pct ${wrClass}">${pctStr}</span>
           <div class="winrate-bar-track"><div class="${barFillClass}" style="width:${barWidth}%"></div></div>
+          ${rankedStr ? `<span class="ranked-wr">${escapeHtml(rankedStr)}</span>` : ''}
         </div>
       </div>
 
