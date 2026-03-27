@@ -3,9 +3,20 @@
 import argparse
 import json
 import logging
+import os
 import queue
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
+
+# Load .env from project root if present
+_env_path = Path(__file__).parent / ".env"
+if _env_path.exists():
+    for _line in _env_path.read_text().splitlines():
+        _line = _line.strip()
+        if _line and not _line.startswith("#") and "=" in _line:
+            _k, _v = _line.split("=", 1)
+            os.environ.setdefault(_k.strip(), _v.strip())
 
 from flask import Flask, Response, render_template, request
 
@@ -107,6 +118,24 @@ def stream():
     )
 
 
+@app.route("/test/<match_id>")
+def test_match(match_id):
+    global _current_match_id, _analyzing
+    local_steam64 = "76561198046685971"
+    with _gsi_lock:
+        if _analyzing:
+            return "Analysis already in progress", 409
+        _current_match_id = match_id
+        _analyzing = True
+    thread = threading.Thread(
+        target=_run_analysis,
+        args=(match_id, local_steam64, True),  # skip_realtime=True for completed matches
+        daemon=True,
+    )
+    thread.start()
+    return f"Analysis started for match {match_id}", 200
+
+
 @app.route("/gsi", methods=["POST"])
 def gsi():
     data = request.get_json(silent=True, force=True)
@@ -168,7 +197,7 @@ def _process_gsi(data: dict):
     thread.start()
 
 
-def _run_analysis(match_id: str, local_steam64: str):
+def _run_analysis(match_id: str, local_steam64: str, skip_realtime: bool = False):
     global _analyzing
     try:
         if _client is None or _finder is None:
@@ -178,7 +207,7 @@ def _run_analysis(match_id: str, local_steam64: str):
         # Phase 1: discover all players (blocks for up to ~17 min total)
         _broadcast("status", {"status": "discovering"})
         logger.info("Discovering players via MatchFinder…")
-        teammates, enemies = _finder.find_players(match_id, local_steam64)
+        teammates, enemies = _finder.find_players(match_id, local_steam64, skip_realtime=skip_realtime)
     except Exception as exc:
         logger.error(f"Player discovery error: {exc}", exc_info=True)
         teammates, enemies = [local_steam64], []
@@ -276,11 +305,11 @@ def main():
     parser = argparse.ArgumentParser(description="Dota 2 Match Analyzer – Web UI")
     parser.add_argument("--port", type=int, default=5000,
                         help="HTTP port (default: 5000)")
-    parser.add_argument("--api-key", default=None,
+    parser.add_argument("--api-key", default=os.environ.get("OPENDOTA_API_KEY"),
                         help="OpenDota API key (optional, raises rate limit)")
-    parser.add_argument("--stratz-token", default=None,
+    parser.add_argument("--stratz-token", default=os.environ.get("STRATZ_TOKEN"),
                         help="STRATZ API token for post-match lookups")
-    parser.add_argument("--steam-api-key", default=None,
+    parser.add_argument("--steam-api-key", default=os.environ.get("STEAM_API_KEY"),
                         help="Steam Web API key for real-time player lookup (steamcommunity.com/dev/apikey)")
     parser.add_argument("--dota-path", default=None,
                         help="Path to Dota 2 game/dota directory (for console.log parsing)")

@@ -270,6 +270,11 @@ a:hover { color: var(--accent-hover); text-decoration: underline; }
 }
 .winrate-bar-fill.low { background: var(--loss); }
 
+.ranked-wr {
+  font-size: 11px; color: var(--text-muted); white-space: nowrap;
+  margin-left: 2px;
+}
+
 /* Action buttons column */
 .card-actions {
   display: flex; flex-direction: column; gap: 4px; flex-shrink: 0;
